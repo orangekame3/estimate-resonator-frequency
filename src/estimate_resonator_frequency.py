@@ -62,6 +62,7 @@ class Resonance:
     def score(self):
         return (
             self.has_high_power_peaks,
+            self.high_power_x_span,
             self.has_low_power_peak,
             self.high_power_grad,
             self.max_prominence,
@@ -84,6 +85,14 @@ class Resonance:
             Resonance.compute_grad(p0, p1)
             for p0, p1 in itertools.combinations(self.peaks, 2)
         )
+
+    @functools.cached_property
+    def high_power_x_span(self):
+        if not self.high_power_peaks:
+            return float("-inf")
+
+        xs = [peak.x for peak in self.high_power_peaks.peaks]
+        return max(xs) - min(xs)
 
     @functools.cached_property
     def peaks(self):

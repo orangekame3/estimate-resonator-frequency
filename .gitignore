@@ -2,3 +2,9 @@ __pycache__
 .python-version
 .venv
 config.json
+
+# Local analysis artifacts and raw downloads
+analysis_outputs/
+data/extracted/
+*_artifacts.zip
+data/*.zip
