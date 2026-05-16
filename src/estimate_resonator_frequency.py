@@ -40,6 +40,7 @@ class Resonance:
         high_power_peaks: PeakGroup | None,
         low_power_peak: Peak | None,
         complementary_peaks: list[Peak] | None = None,
+        representative_x: int | None = None,
     ):
         if complementary_peaks is None:
             complementary_peaks = []
@@ -47,9 +48,13 @@ class Resonance:
         self.high_power_peaks = high_power_peaks
         self.low_power_peak = low_power_peak
         self.complementary_peaks = complementary_peaks
+        self.representative_x = representative_x
 
     @property
     def x(self):
+        if self.representative_x is not None:
+            return self.representative_x
+
         if self.low_power_peak:
             return self.low_power_peak.x
 
@@ -77,6 +82,13 @@ class Resonance:
         return bool(self.low_power_peak)
 
     @functools.cached_property
+    def has_adjacent_low_power_peak(self):
+        if not self.high_power_peaks or not self.low_power_peak:
+            return False
+
+        return abs(self.high_power_peaks.bottom.y - self.low_power_peak.y) <= 1
+
+    @functools.cached_property
     def high_power_grad(self):
         if len(self.peaks) <= 1:
             return float("-inf")
@@ -93,6 +105,13 @@ class Resonance:
 
         xs = [peak.x for peak in self.high_power_peaks.peaks]
         return max(xs) - min(xs)
+
+    @functools.cached_property
+    def high_power_prominence(self):
+        if not self.high_power_peaks:
+            return float("-inf")
+
+        return max(peak.prominence for peak in self.high_power_peaks.peaks)
 
     @functools.cached_property
     def peaks(self):
@@ -260,6 +279,200 @@ def group_resonances(resonances: Sequence[Resonance], x_distance_max: int):
     return groups
 
 
+def nearby_resonance_score(resonance: Resonance):
+    return (
+        resonance.has_high_power_peaks,
+        resonance.high_power_grad,
+        resonance.has_low_power_peak,
+        resonance.high_power_prominence,
+        resonance.high_power_x_span,
+        resonance.max_prominence,
+    )
+
+
+def refill_resonance_score(resonance: Resonance):
+    if resonance.high_power_x_span == 0:
+        return (
+            resonance.has_high_power_peaks,
+            resonance.high_power_x_span,
+            resonance.high_power_prominence,
+            resonance.has_low_power_peak,
+            resonance.high_power_grad,
+            resonance.max_prominence,
+        )
+
+    return resonance.score
+
+
+def deduplicate_nearby_resonances(
+    resonances: Sequence[Resonance], x_distance_max: int
+):
+    if not resonances:
+        return [], []
+
+    max_x_span = max(
+        (
+            resonance.high_power_x_span
+            for resonance in resonances
+            if resonance.has_high_power_peaks
+        ),
+        default=0,
+    )
+    x_distance_max += max_x_span
+
+    clusters: list[list[Resonance]] = []
+    for resonance in sorted(resonances, key=attrgetter("x")):
+        if not clusters or resonance.x - clusters[-1][0].x > x_distance_max:
+            clusters.append([resonance])
+        else:
+            clusters[-1].append(resonance)
+
+    selected: list[Resonance] = []
+    rests: list[Resonance] = []
+    for cluster in clusters:
+        cluster = sorted(cluster, key=nearby_resonance_score, reverse=True)
+        selected.append(cluster[0])
+        rests.extend(cluster[1:])
+
+    return selected, rests
+
+
+def local_resonance_score(resonance: Resonance):
+    return (
+        resonance.has_high_power_peaks,
+        resonance.has_adjacent_low_power_peak,
+        resonance.high_power_x_span,
+        resonance.has_low_power_peak,
+        resonance.high_power_grad,
+        resonance.high_power_prominence,
+        resonance.max_prominence,
+    )
+
+
+def select_local_resonance(resonances: Sequence[Resonance]):
+    resonances = sorted(resonances, key=attrgetter("score"), reverse=True)
+    selected = resonances[0]
+
+    if selected.has_low_power_peak:
+        return selected, resonances[1:]
+
+    adjacent_low_candidates = [
+        resonance
+        for resonance in resonances[1:]
+        if resonance.has_adjacent_low_power_peak
+        and resonance.high_power_prominence > selected.high_power_prominence
+    ]
+    if not adjacent_low_candidates:
+        return selected, resonances[1:]
+
+    selected = sorted(
+        adjacent_low_candidates,
+        key=attrgetter("high_power_prominence"),
+        reverse=True,
+    )[0]
+    return selected, [resonance for resonance in resonances if resonance is not selected]
+
+
+def select_resonances(
+    resonances: Sequence[Resonance], num_resonators: int, x_distance_max: int
+):
+    candidates = sorted(resonances, key=attrgetter("score"), reverse=True)
+    selected, rests = deduplicate_nearby_resonances(
+        candidates[:num_resonators], x_distance_max
+    )
+    rests.extend(candidates[num_resonators:])
+
+    if len(selected) < num_resonators:
+        refill_candidates = sorted(rests, key=refill_resonance_score, reverse=True)
+        selected_ids = {id(resonance) for resonance in selected}
+        selected_next = selected[:]
+        rests_next: list[Resonance] = []
+
+        for resonance in refill_candidates:
+            if id(resonance) in selected_ids:
+                continue
+
+            trial_selected, trial_rests = deduplicate_nearby_resonances(
+                [*selected_next, resonance], x_distance_max
+            )
+            if (
+                len(trial_selected) > len(selected_next)
+                and len(selected_next) < num_resonators
+            ):
+                selected_next = trial_selected
+                selected_ids = {id(resonance) for resonance in selected_next}
+                rests_next.extend(trial_rests)
+            else:
+                rests_next.append(resonance)
+
+        selected = selected_next
+        rests = rests_next
+
+    selected = sorted(selected, key=attrgetter("score"), reverse=True)[:num_resonators]
+    selected_ids = {id(resonance) for resonance in selected}
+    rests = [
+        resonance
+        for resonance in resonances
+        if id(resonance) not in selected_ids
+    ]
+
+    return selected, rests
+
+
+def refine_high_power_only_resonance_x(
+    resonance: Resonance,
+    zs: Sequence[Sequence[float]],
+    y_idx_high_min: int,
+    x_distance_max: int,
+):
+    if (
+        not resonance.high_power_peaks
+        or resonance.low_power_peak
+        or resonance.high_power_x_span != 0
+    ):
+        return resonance
+
+    base_peak = resonance.high_power_peaks.bottom
+    if y_idx_high_min >= base_peak.y:
+        return resonance
+
+    z_arr = np.asarray(zs)
+    best_peak: Peak | None = None
+    best_score = float("-inf")
+
+    for y_idx in range(y_idx_high_min, base_peak.y):
+        x_min = base_peak.x
+        x_max = min(
+            z_arr.shape[1] - 1,
+            base_peak.x + (base_peak.y - y_idx) * x_distance_max,
+        )
+        if x_min > x_max:
+            continue
+
+        row = z_arr[y_idx]
+        baseline = float(np.median(row))
+        window = row[x_min : x_max + 1]
+        if window.size == 0:
+            continue
+
+        rel_idx = int(np.argmax(np.abs(window - baseline)))
+        x_idx = x_min + rel_idx
+        score = abs(float(row[x_idx]) - baseline)
+        if score > best_score:
+            best_score = score
+            best_peak = Peak(x_idx, y_idx, score)
+
+    if best_peak is None:
+        return resonance
+
+    return Resonance(
+        high_power_peaks=resonance.high_power_peaks,
+        low_power_peak=resonance.low_power_peak,
+        complementary_peaks=[*resonance.complementary_peaks, best_peak],
+        representative_x=best_peak.x,
+    )
+
+
 def detect_high_power_peak_groups(
     ys: Sequence[float],
     zs: Sequence[Sequence[float]],
@@ -373,7 +586,8 @@ def complement_peaks(
     return Resonance(
         high_power_peaks=resonance.high_power_peaks,
         low_power_peak=resonance.low_power_peak,
-        complementary_peaks=target_peaks,
+        complementary_peaks=[*resonance.complementary_peaks, *target_peaks],
+        representative_x=resonance.representative_x,
     )
 
 
@@ -402,6 +616,12 @@ def estimate_resonator_frequency(
         find_peaks_conf_high,
         group_peaks_conf,
     )
+    y_idx_high_min = 0
+    if high_power_min is not None:
+        y_idx_high_min = arg_closest(ys, high_power_min)
+        if high_power_max is not None:
+            y_idx_high_max = arg_closest(ys, high_power_max)
+            y_idx_high_min = min(y_idx_high_min, y_idx_high_max)
 
     ## 2. Detect peaks in the low-power region
     y_idx_low = arg_closest(ys, low_power)
@@ -424,13 +644,25 @@ def estimate_resonator_frequency(
         ),
         **group_resonances_conf,
     ):
-        res_group = sorted(res_group, key=attrgetter("score"), reverse=True)
-        resonances.append(res_group[0])
-        rests.extend(res_group[1:])
+        resonance, rest = select_local_resonance(res_group)
+        resonances.append(resonance)
+        rests.extend(rest)
 
-    resonances = sorted(resonances, key=attrgetter("score"), reverse=True)
-    rests.extend(resonances[num_resonators:])
-    resonances = resonances[:num_resonators]
+    resonances, additional_rests = select_resonances(
+        resonances,
+        num_resonators,
+        group_resonances_conf["x_distance_max"],
+    )
+    resonances = [
+        refine_high_power_only_resonance_x(
+            resonance,
+            zs,
+            y_idx_high_min,
+            group_resonances_conf["x_distance_max"],
+        )
+        for resonance in resonances
+    ]
+    rests.extend(additional_rests)
 
     resonances = sorted(resonances, key=attrgetter("x"))
     rests = sorted(rests, key=attrgetter("x"))

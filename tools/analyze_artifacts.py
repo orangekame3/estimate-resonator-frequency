@@ -120,7 +120,7 @@ def extract_mux(data: dict[str, Any]) -> str:
 
 
 def spectroscopy_index(path: pathlib.Path) -> int:
-    if match := re.search(r"_(\d+)_0\.json$", path.name):
+    if match := re.search(r"_(\d+)(?:_[^_]*)?_0\.json$", path.name):
         return int(match[1])
     raise ValueError(f"unexpected spectroscopy filename: {path}")
 
