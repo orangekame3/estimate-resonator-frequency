@@ -9,6 +9,7 @@ def mark(
     rests,
     local_boundaries,
     minimum_usable_power,
+    resonance_assignments,
     fig,
     debug,
 ):
@@ -106,6 +107,25 @@ def mark(
             line_dash='dash',
         )
 
+    for resonance, assignment in zip(resonances, resonance_assignments):
+        x = data['data'][0]['x'][resonance.x]
+        parts = []
+        if assignment.get('qubit') is not None:
+            parts.append(f"Q{int(assignment['qubit']):02d}")
+        if assignment.get('sorted_slot') is not None:
+            parts.append(f"s{assignment['sorted_slot']}")
+        label = " / ".join(parts)
+        if label:
+            fig.add_annotation(
+                x=x,
+                y=1.02,
+                yref='paper',
+                text=label,
+                showarrow=False,
+                font=dict(color='red', size=11),
+                align='center',
+            )
+
     for resonance in rests:
         fig.add_vline(
             x=data['data'][0]['x'][resonance.x],
@@ -129,6 +149,7 @@ def output_images(
     rests,
     local_boundaries,
     minimum_usable_power,
+    resonance_assignments,
     image_path_prefix,
     plot,
     debug,
@@ -145,6 +166,7 @@ def output_images(
         rests,
         local_boundaries,
         minimum_usable_power,
+        resonance_assignments,
         fig,
         debug,
     )
