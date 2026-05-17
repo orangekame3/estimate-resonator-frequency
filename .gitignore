@@ -7,4 +7,5 @@ config.json
 analysis_outputs/
 data/extracted/
 *_artifacts.zip
+*_artifacts*.zip
 data/*.zip
