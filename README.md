@@ -119,7 +119,7 @@ main.pyの出力オプション
         "low_power_max": -25.0,
         "low_power_min": -40.0
       },
-      "optimal_power": -35.0
+      "optimal_power": -30.0
     },
     ...
   ]
