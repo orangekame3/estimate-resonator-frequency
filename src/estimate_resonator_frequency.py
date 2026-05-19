@@ -310,16 +310,6 @@ def deduplicate_nearby_resonances(
     if not resonances:
         return [], []
 
-    max_x_span = max(
-        (
-            resonance.high_power_x_span
-            for resonance in resonances
-            if resonance.has_high_power_peaks
-        ),
-        default=0,
-    )
-    x_distance_max += max_x_span
-
     clusters: list[list[Resonance]] = []
     for resonance in sorted(resonances, key=attrgetter("x")):
         if not clusters or resonance.x - clusters[-1][0].x > x_distance_max:
@@ -417,6 +407,120 @@ def select_resonances(
     ]
 
     return selected, rests
+
+
+def diverse_resonance_score(resonance: Resonance):
+    high_power_prominence = (
+        resonance.high_power_prominence if resonance.has_high_power_peaks else 0.0
+    )
+    high_power_x_span_capped = (
+        min(max(resonance.high_power_x_span, 0), 12)
+        if resonance.has_high_power_peaks
+        else 0
+    )
+    return (
+        resonance.has_high_power_peaks,
+        resonance.has_adjacent_low_power_peak,
+        resonance.has_low_power_peak,
+        high_power_prominence,
+        high_power_x_span_capped,
+        resonance.max_prominence,
+    )
+
+
+def rebalance_edge_resonances(
+    selected: Sequence[Resonance],
+    resonances: Sequence[Resonance],
+):
+    selected_ids = {id(resonance) for resonance in selected}
+    selected = sorted(selected, key=attrgetter("x"))
+    rests = [
+        resonance
+        for resonance in resonances
+        if id(resonance) not in selected_ids
+    ]
+
+    if not selected:
+        return list(selected)
+
+    left_edge_candidates = [
+        resonance
+        for resonance in rests
+        if resonance.x < selected[0].x
+        and resonance.has_high_power_peaks
+        and resonance.has_low_power_peak
+        and not resonance.has_adjacent_low_power_peak
+        and resonance.high_power_x_span >= 12
+        and resonance.max_prominence >= 0.2
+    ]
+    if not left_edge_candidates:
+        return list(selected)
+
+    right_edge = selected[-1]
+    if (
+        not right_edge.has_high_power_peaks
+        or right_edge.high_power_x_span > 2
+        or right_edge.max_prominence >= 0.8
+    ):
+        return list(selected)
+
+    left_edge = sorted(
+        left_edge_candidates,
+        key=lambda resonance: (
+            resonance.high_power_x_span,
+            resonance.max_prominence,
+        ),
+        reverse=True,
+    )[0]
+
+    return [left_edge, *selected[:-1]]
+
+
+def select_diverse_resonances(
+    resonances: Sequence[Resonance], num_resonators: int, x_distance_max: int
+):
+    if len(resonances) <= num_resonators:
+        return list(resonances), []
+
+    x_distance_max = min(x_distance_max, 15)
+    best_score = None
+    best_resonances: tuple[Resonance, ...] | None = None
+
+    for candidates in itertools.combinations(resonances, num_resonators):
+        xs = sorted(resonance.x for resonance in candidates)
+        if any(x1 - x0 <= x_distance_max for x0, x1 in zip(xs, xs[1:])):
+            continue
+
+        score = tuple(
+            sum(score_part for score_part in score_parts)
+            for score_parts in zip(*(diverse_resonance_score(r) for r in candidates))
+        )
+        if best_score is None or score > best_score:
+            best_score = score
+            best_resonances = candidates
+
+    if best_resonances is None:
+        best_resonances = tuple(
+            sorted(resonances, key=diverse_resonance_score, reverse=True)[
+                :num_resonators
+            ]
+        )
+
+    best_resonances = tuple(rebalance_edge_resonances(best_resonances, resonances))
+    selected_ids = {id(resonance) for resonance in best_resonances}
+    rests = [resonance for resonance in resonances if id(resonance) not in selected_ids]
+    return list(best_resonances), rests
+
+
+def needs_diverse_reselection(resonances: Sequence[Resonance]):
+    return any(
+        not resonance.has_high_power_peaks
+        or (
+            not resonance.has_adjacent_low_power_peak
+            and resonance.max_prominence < 0.8
+        )
+        for resonance in resonances
+    )
 
 
 def refine_high_power_only_resonance_x(
@@ -637,6 +741,7 @@ def estimate_resonator_frequency(
     ## 3. Integrate the results from 1 and 2, and estimate genuine resonance through scoring.
     resonances: list[Resonance] = []
     rests: list[Resonance] = []
+    candidates: list[Resonance] = []
 
     for res_group in group_resonances(
         compose_resonances(
@@ -644,6 +749,7 @@ def estimate_resonator_frequency(
         ),
         **group_resonances_conf,
     ):
+        candidates.extend(res_group)
         resonance, rest = select_local_resonance(res_group)
         resonances.append(resonance)
         rests.extend(rest)
@@ -653,6 +759,14 @@ def estimate_resonator_frequency(
         num_resonators,
         group_resonances_conf["x_distance_max"],
     )
+    rests.extend(additional_rests)
+
+    if needs_diverse_reselection(resonances):
+        resonances, rests = select_diverse_resonances(
+            candidates,
+            num_resonators,
+            group_resonances_conf["x_distance_max"],
+        )
     resonances = [
         refine_high_power_only_resonance_x(
             resonance,
@@ -662,7 +776,6 @@ def estimate_resonator_frequency(
         )
         for resonance in resonances
     ]
-    rests.extend(additional_rests)
 
     resonances = sorted(resonances, key=attrgetter("x"))
     rests = sorted(rests, key=attrgetter("x"))
